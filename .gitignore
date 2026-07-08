@@ -1,0 +1,9 @@
+venv/
+__pycache__/
+*.pyc
+.env
+*.log
+_test_*
+_explore*
+_page*
+_api_sample*

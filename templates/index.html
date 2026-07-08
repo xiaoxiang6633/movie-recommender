@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>电影推荐系统</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --card: #1a1a2e;
+    --border: #2a2a4a;
+    --accent: #6366f1;
+    --accent-hover: #818cf8;
+    --text: #e2e8f0;
+    --text-muted: #94a3b8;
+    --success: #22c55e;
+    --error: #ef4444;
+    --star: #fbbf24;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans SC", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    line-height: 1.6;
+  }
+
+  .container { max-width: 960px; margin: 0 auto; padding: 24px 20px 60px; }
+
+  header {
+    text-align: center; padding: 40px 0 32px;
+  }
+  header h1 {
+    font-size: 28px; font-weight: 700; letter-spacing: -0.5px;
+    background: linear-gradient(135deg, var(--accent), #a855f7);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  header p { color: var(--text-muted); margin-top: 6px; font-size: 14px; }
+
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 14px; padding: 24px; margin-bottom: 20px;
+  }
+  .card h2 {
+    font-size: 16px; font-weight: 600; margin-bottom: 16px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .card h2 .step {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px; border-radius: 50%;
+    background: var(--accent); font-size: 13px; font-weight: 700; flex-shrink: 0;
+  }
+
+  .row { display: flex; gap: 10px; }
+  .row.grow > :first-child { flex: 1; }
+
+  input, textarea {
+    width: 100%; padding: 11px 14px; border-radius: 9px;
+    border: 1px solid var(--border); background: var(--bg);
+    color: var(--text); font-size: 14px; font-family: inherit;
+    transition: border-color .2s;
+  }
+  input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  textarea { resize: vertical; min-height: 88px; }
+
+  button {
+    padding: 11px 22px; border-radius: 9px; border: none;
+    font-size: 14px; font-weight: 600; cursor: pointer;
+    transition: all .2s; white-space: nowrap;
+    font-family: inherit;
+  }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  .btn-outline:hover { border-color: var(--accent); }
+
+  .status { font-size: 13px; margin-top: 10px; min-height: 20px; }
+  .status.loading { color: var(--accent); }
+  .status.error { color: var(--error); }
+  .status.success { color: var(--success); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 14px; }
+  th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--text-muted); font-weight: 500; font-size: 12px; text-transform: uppercase; }
+  tr:hover td { background: rgba(255,255,255,0.02); }
+  .rating { color: var(--star); font-weight: 600; }
+  .movie-table-wrap { max-height: 360px; overflow-y: auto; border-radius: 9px; }
+
+  .rec-card {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 11px; padding: 18px; margin-bottom: 12px;
+  }
+  .rec-card .rec-title { font-size: 16px; font-weight: 600; }
+  .rec-card .rec-meta { font-size: 13px; color: var(--text-muted); margin: 2px 0 8px; }
+  .rec-card .rec-reason { font-size: 14px; line-height: 1.7; color: var(--text); }
+  .summary-box {
+    background: rgba(99,102,241,0.08); border-left: 3px solid var(--accent);
+    border-radius: 0 9px 9px 0; padding: 14px 18px; margin-top: 16px;
+    font-size: 14px; color: var(--text);
+  }
+
+  .spinner {
+    display: inline-block; width: 16px; height: 16px;
+    border: 2px solid var(--border); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin .6s linear infinite;
+    vertical-align: middle; margin-right: 6px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .hint { color: var(--text-muted); font-size: 12px; margin-top: 6px; }
+  .divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>PPXZY Movie Recommender</h1>
+  <p>爬取电影网站 + DeepSeek AI 智能推荐</p>
+</header>
+
+<!-- Step 1: Crawl -->
+<div class="card">
+  <h2><span class="step">1</span> 爬取电影数据</h2>
+  <div class="row grow">
+    <select id="site" onchange="onSiteChange()" style="width:auto;padding:11px 14px;border-radius:9px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:14px;font-family:inherit;cursor:pointer;">
+      <option value="ppxzy">皮皮虾资源 (ppxzy)</option>
+      <option value="douban">豆瓣电影 Top 250</option>
+    </select>
+    <select id="category" onchange="onCategoryChange()" style="width:auto;padding:11px 14px;border-radius:9px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:14px;font-family:inherit;cursor:pointer;">
+      <option value="">全部电影</option>
+      <option value="hydy">华语电影</option>
+      <option value="omdy">欧美电影</option>
+      <option value="rhdy">日韩电影</option>
+      <option value="qtdy">其他电影</option>
+      <option value="dh">动画</option>
+      <option value="jlp">纪录片</option>
+      <option value="jj">剧集</option>
+    </select>
+    <select id="genre" style="width:auto;padding:11px 14px;border-radius:9px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:14px;font-family:inherit;cursor:pointer;">
+      <option value="">全部类型</option>
+      <option value="juqing">剧情</option>
+      <option value="xiju">喜剧</option>
+      <option value="dongzuo">动作</option>
+      <option value="aiq">爱情</option>
+      <option value="kehuan">科幻</option>
+      <option value="kongbu">恐怖</option>
+      <option value="jingsong">惊悚</option>
+      <option value="xuanyi">悬疑</option>
+      <option value="fanzui">犯罪</option>
+      <option value="qihuan">奇幻</option>
+      <option value="maoxian">冒险</option>
+      <option value="zhanzheng">战争</option>
+      <option value="lishi">历史</option>
+      <option value="guzhuang">古装</option>
+      <option value="wuxia">武侠</option>
+      <option value="zhuanji">传记</option>
+      <option value="jiating">家庭</option>
+      <option value="tongxing">同性</option>
+      <option value="yinyue">音乐</option>
+      <option value="gewu">歌舞</option>
+      <option value="xibu">西部</option>
+      <option value="zainan">灾难</option>
+      <option value="ertong">儿童</option>
+    </select>
+    <input type="text" id="url" value="https://ppxzy.top/" placeholder="输入电影网站网址" style="display:none;">
+    <button class="btn-primary" id="crawlBtn" onclick="doCrawl()">开始爬取</button>
+  </div>
+  <div class="row grow" style="margin-top:10px;">
+    <input type="text" id="tmdbKey" placeholder="TMDB API Key（可选，用于获取高清海报，在 tmdb.org 免费注册获取）" style="flex:1;">
+  </div>
+  <div class="hint">选择来源和分类，点击"开始爬取"获取电影数据。填入 TMDB Key 可获取高清海报</div>
+  <div class="status" id="crawlStatus"></div>
+  <div class="movie-table-wrap" id="movieTable" style="display:none;"></div>
+</div>
+
+<!-- Step 2: Recommend -->
+<div class="card">
+  <h2><span class="step">2</span> AI 智能推荐</h2>
+  <div class="row grow" style="margin-bottom:12px;">
+    <input type="password" id="apiKey" placeholder="输入 DeepSeek API Key（sk-...）">
+  </div>
+  <div class="hint" style="margin-bottom:12px;">在 <a href="https://platform.deepseek.com/api_keys" target="_blank" style="color:var(--accent);">platform.deepseek.com</a> 获取 API Key，新用户有免费额度</div>
+  <textarea id="preference" placeholder="描述你想看什么电影...&#10;&#10;例如：我想看一部悬疑烧脑的经典电影，评分要高，最好是2000年以后的"></textarea>
+  <div style="margin-top:14px;">
+    <button class="btn-primary" id="recommendBtn" onclick="doRecommend()">AI 推荐</button>
+  </div>
+  <div class="status" id="recStatus"></div>
+  <div id="recResults"></div>
+</div>
+
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+const URL_MAP = {
+  ppxzy: "https://ppxzy.top/",
+  douban: "https://movie.douban.com/top250",
+};
+
+function getTargetUrl() {
+  const site = $("site").value;
+  const category = $("category").value;
+  if (site === "douban") return URL_MAP.douban;
+  return URL_MAP.ppxzy + (category || "");
+}
+
+function onSiteChange() {
+  const site = $("site").value;
+  const display = site === "ppxzy" ? "" : "none";
+  $("category").style.display = display;
+  $("genre").style.display = display;
+}
+
+async function doCrawl() {
+  const site = $("site").value;
+  const url = getTargetUrl();
+  const category = site === "ppxzy" ? $("category").value : "";
+  const genre = site === "ppxzy" ? $("genre").value : "";
+  const tmdbKey = $("tmdbKey").value.trim();
+
+  const btn = $("crawlBtn");
+  btn.disabled = true;
+  btn.textContent = "爬取中...";
+  showStatus("crawlStatus", '<span class="spinner"></span>正在爬取，请稍候...', "loading");
+  $("movieTable").style.display = "none";
+
+  try {
+    const resp = await fetch("/api/crawl", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, category, genre, tmdb_key: tmdbKey }),
+    });
+    const data = await resp.json();
+    if (!data.ok) throw new Error(data.error);
+
+    showStatus("crawlStatus", `成功爬取 ${data.count} 部电影`, "success");
+    renderMovieTable(data.movies);
+  } catch (e) {
+    showStatus("crawlStatus", e.message, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "开始爬取";
+  }
+}
+
+function renderMovieTable(movies) {
+  let html = '<table><thead><tr><th>剧照</th><th>电影名</th><th>年份</th><th>类型</th><th>导演</th><th>简介</th></tr></thead><tbody>';
+  movies.forEach((m, i) => {
+    const imgTag = m.poster
+      ? `<img src="${esc(m.poster)}" loading="lazy" style="width:60px;height:80px;object-fit:cover;border-radius:4px;" onerror="this.style.display='none'" alt="">`
+      : '<div style="width:60px;height:80px;background:var(--border);border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--text-muted);">无图</div>';
+    html += `<tr>
+      <td>${imgTag}</td>
+      <td style="white-space:nowrap;"><strong>${esc(m.title)}</strong>${m.original_title ? ' <small style="color:#94a3b8">' + esc(m.original_title) + '</small>' : ""}</td>
+      <td style="white-space:nowrap;">${esc(m.year)}</td>
+      <td style="white-space:nowrap;">${esc(m.genre)}</td>
+      <td style="white-space:nowrap;">${esc(m.director)}</td>
+      <td style="word-break:break-all;">${esc(m.description)}</td>
+    </tr>`;
+  });
+  html += "</tbody></table>";
+  const wrap = $("movieTable");
+  wrap.innerHTML = html;
+  wrap.style.display = "block";
+}
+
+async function doRecommend() {
+  const query = $("preference").value.trim();
+  const apiKey = $("apiKey").value.trim();
+  if (!query) return showStatus("recStatus", "请输入观影偏好", "error");
+  if (!apiKey) return showStatus("recStatus", "请提供 DeepSeek API Key", "error");
+
+  const btn = $("recommendBtn");
+  btn.disabled = true;
+  btn.textContent = "AI 分析中...";
+  showStatus("recStatus", '<span class="spinner"></span>正在分析你的偏好，匹配电影中...', "loading");
+  $("recResults").innerHTML = "";
+
+  try {
+    const resp = await fetch("/api/recommend", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, api_key: apiKey }),
+    });
+    const data = await resp.json();
+    if (!data.ok) throw new Error(data.error);
+
+    showStatus("recStatus", "", "");
+    renderResults(data.data);
+  } catch (e) {
+    showStatus("recStatus", e.message, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "AI 推荐";
+  }
+}
+
+function renderResults(data) {
+  let html = "";
+  const recs = data.recommendations || [];
+  if (recs.length > 0) {
+    html += '<hr class="divider">';
+    recs.forEach(r => {
+      html += `<div class="rec-card">
+        <div class="rec-title">${esc(r.title)} <span style="color:#fbbf24;">★ ${esc(r.rating)}</span></div>
+        <div class="rec-meta">${esc(r.year || "")}${r.year && r.director ? " · " : ""}${esc(r.director || "")}</div>
+        <div class="rec-reason">${esc(r.reason)}</div>
+      </div>`;
+    });
+  }
+  if (data.summary) {
+    html += `<div class="summary-box"><strong>总结：</strong>${esc(data.summary)}</div>`;
+  }
+  $("recResults").innerHTML = html;
+}
+
+function showStatus(id, msg, cls) {
+  const el = $(id);
+  el.className = "status " + cls;
+  el.innerHTML = msg;
+}
+
+function esc(s) {
+  if (!s) return "";
+  const div = document.createElement("div");
+  div.appendChild(document.createTextNode(String(s)));
+  return div.innerHTML;
+}
+</script>
+</body>
+</html>
