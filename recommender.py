@@ -41,9 +41,9 @@ def recommend(movies: list[dict], user_query: str, api_key: str) -> dict:
             "recommendations": [],
             "summary": "请提供 DeepSeek API Key（可在 https://platform.deepseek.com 获取）。",
         }
-
+    #Deepseek   创建 OpenAI 客户端时用掉api_key
     client = OpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
-
+    #精简电影数据，只上传给Deepseek6个字段
     minimal_movies = []
     for m in movies:
         entry = {
@@ -66,6 +66,7 @@ def recommend(movies: list[dict], user_query: str, api_key: str) -> dict:
     )
 
     try:
+        #DeepSeek 服务器校验 sk-xxx，扣费，返回推荐结果
         resp = client.chat.completions.create(
             model="deepseek-chat",
             messages=[
