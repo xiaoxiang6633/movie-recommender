@@ -6,9 +6,18 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 
-from config import HEADERS, CRAWL_DELAY, CRAWL_TIMEOUT, MAX_MOVIES
+from config import (
+    HEADERS, CRAWL_DELAY, CRAWL_TIMEOUT, MAX_MOVIES,
+    PPXZY_USERNAME, PPXZY_PASSWORD, FETCH_RESOURCE_LINKS,
+)
 
 logger = logging.getLogger(__name__)
+
+# Module-level state exposed to app.py so the frontend can report login status.
+# Reset before each crawl; _ppxzy_login sets them.
+_ppxzy_login_failed = False
+_ppxzy_login_attempted = False
+_ppxzy_login_error = ""
 
 PPXZY_CATEGORIES = {
     # top-level
@@ -55,16 +64,279 @@ PPXZY_GENRES = {
     "ertong": 146,    # 儿童
 }
 
+# Known cloud storage domains and their labels
+CLOUD_DOMAINS = {
+    "pan.baidu.com": "百度网盘",
+    "pan.baidu": "百度网盘",
+    "aliyundrive.com": "阿里云盘",
+    "alipan.com": "阿里云盘",
+    "pan.quark.cn": "夸克网盘",
+    "xunlei.com": "迅雷云盘",
+    "pan.xunlei.com": "迅雷云盘",
+    "115.com": "115网盘",
+    "ctfile.com": "城通网盘",
+    "lanzou": "蓝奏云",
+    "feijipan.com": "飞机盘",
+    "caiyun.139.com": "中国移动云盘",
+    "yunpan": "360云盘",
+    "uc.cn": "UC网盘",
+}
 
-def crawl(url: str, category: str = "", genre: str = "") -> list[dict]:
+_session: requests.Session | None = None
+
+
+def _ppxzy_login(username: str = "", password: str = "") -> requests.Session | None:
+    """Login to ppxzy.top and return an authenticated session, or None on failure."""
+    global _session, _ppxzy_login_failed, _ppxzy_login_attempted, _ppxzy_login_error
+
+    user = username or PPXZY_USERNAME
+    pwd = password or PPXZY_PASSWORD
+
+    if _session is not None:
+        return _session
+
+    session = requests.Session() # 开一个"浏览器标签页"
+    session.headers.update(HEADERS)
+
+    if not user or not pwd:
+        logger.info("No ppxzy credentials provided, skipping login")
+        _session = session
+        return _session
+
+    _ppxzy_login_attempted = True
+    _ppxzy_login_failed = False
+    _ppxzy_login_error = ""
+
+    login_url = "https://ppxzy.top/user/login"
+    admin_ajax = "https://ppxzy.top/wp-admin/admin-ajax.php"
+
+    login_ok = False
+    try:
+        # Step 1: Fetch login page to get session cookies
+        # 第一步：GET 登录页，服务器返回 Set-Cookie: PHPSESSID=abc123
+        resp = session.get(login_url, timeout=CRAWL_TIMEOUT)
+        resp.raise_for_status()
+        logger.info("ppxzy login: got initial cookies")
+
+        # Step 2: Submit login via AJAX endpoint (no nonce required)
+        login_data = {
+            "action": "xintheme_login",
+            "login_name": user,
+            "password": pwd,
+        }
+
+        headers = dict(HEADERS)
+        headers.update({
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": login_url,
+            "Origin": "https://ppxzy.top",
+        })
+        #登录
+        # 第二步：POST 账号密码，服务器返回 Set-Cookie: wordpress_logged_in=xxx
+        resp = session.post(admin_ajax, data=login_data, headers=headers, timeout=CRAWL_TIMEOUT)
+        logger.info("ppxzy login response: %s", resp.text[:200])
+
+        try:
+            result = resp.json()
+            if result.get("state") == 200:
+                logger.info("ppxzy login successful")
+                login_ok = True
+            else:
+                _ppxzy_login_error = result.get("tips", "账号或密码错误")
+                logger.warning("ppxzy login failed: %s", _ppxzy_login_error)
+        except Exception:
+            _ppxzy_login_error = "服务器返回异常"
+            logger.warning("ppxzy login response not JSON: %s", resp.text[:100])
+
+    except Exception as e:
+        _ppxzy_login_error = f"登录请求失败: {e}"
+        logger.error("ppxzy login error: %s", e)
+
+    if login_ok:
+        _session = session
+        return _session
+    else:
+        _ppxzy_login_failed = True
+        logger.warning("ppxzy login unsuccessful, resource links will not be fetched")
+        _session = None
+        return None
+
+
+def _fetch_resource_links(post_url: str, session: requests.Session | None = None) -> list[dict]:
+    """Fetch a ppxzy post page and extract cloud drive resource links.
+
+    ppxzy uses the "download-info-page" plugin. The download URLs are loaded
+    dynamically via AJAX (action=wb_dlipp_front). We reverse-engineer that flow:
+    1. Fetch the post page to get wb_dlipp_config (pid) and available data-rid values
+    2. Call the AJAX endpoint for each rid to get the real download URL + password
+    """
+    if session is None:
+        session = _ppxzy_login()
+
+    logger.info("─── [fetch-resources] %s ───", post_url[-40:])
+    resources = []
+    try:
+        resp = session.get(post_url, timeout=CRAWL_TIMEOUT)
+        logger.info("  [step1] GET post page → HTTP %d", resp.status_code)
+
+        if resp.status_code != 200:
+            logger.warning("  [FAIL] HTTP status %d, aborting", resp.status_code)
+            return resources
+
+        if "wp-login" in resp.url:
+            logger.warning("  [FAIL] redirected to wp-login — session cookies not valid")
+            return resources
+
+        html = resp.text
+        logger.info("  [step1] page size: %d bytes, final URL: %s", len(html), resp.url[:80])
+
+        soup = BeautifulSoup(html, "lxml")
+
+        # ── Extract pid ──
+        pid = ""
+        config_m = re.search(r"wb_dlipp_config\s*=\s*\{([^}]+)\}", html)
+        if config_m:
+            config_text = config_m.group(1)
+            pid_m = re.search(r"pid\s*:\s*(\d+)", config_text)
+            if pid_m:
+                pid = pid_m.group(1)
+                logger.info("  [step2] wb_dlipp_config found, pid=%s", pid)
+            else:
+                logger.warning("  [step2] wb_dlipp_config found but pid not in: %s", config_text[:120])
+        else:
+            logger.warning("  [step2] wb_dlipp_config NOT found in page HTML (plugin inactive or renamed?)")
+
+        # Fallback: extract pid from post URL
+        if not pid:
+            pid_m = re.search(r"/(\d+)\.html", post_url)
+            if pid_m:
+                pid = pid_m.group(1)
+                logger.info("  [step2] pid fallback from URL: %s", pid)
+            else:
+                logger.warning("  [step2] cannot determine pid from URL either: %s", post_url)
+
+        # ── Find download buttons ──
+        dl_buttons = soup.select(".dlipp-dl-btn, .j-wbdlbtn-dlipp, a[data-rid]")
+
+        # Fallback: broader selectors (site may have updated CSS)
+        if not dl_buttons:
+            dl_buttons = soup.select("[data-rid]")
+        if not dl_buttons:
+            dl_buttons = soup.select(".dl-btn, .download-btn, [class*=dl], [class*=download]")
+
+        logger.info("  [step3] CSS selectors matched %d download-button candidate(s)", len(dl_buttons))
+
+        rid_labels = {}
+        for btn in dl_buttons:
+            rid = btn.get("data-rid", "").strip()
+            if rid:
+                label = btn.get_text(" ", strip=True) or rid
+                rid_labels[rid] = label
+
+        # Regex fallback: find data-rid directly in HTML
+        if not rid_labels:
+            rid_matches = re.findall(r'data-rid\s*=\s*["\']([^"\']+)["\']', html)
+            for rid in rid_matches:
+                rid_labels[rid] = rid
+            if rid_matches:
+                logger.info("  [step3] regex fallback found %d data-rid(s) in raw HTML: %s",
+                           len(rid_matches), list(rid_labels.keys()))
+
+        if not rid_labels:
+            logger.warning("  [step3] ZERO download buttons — no data-rid found by CSS or regex")
+            # Dump a snippet of HTML around likely download areas
+            snippet = html[html.find("dlipp"):html.find("dlipp")+400] if "dlipp" in html else ""
+            if snippet:
+                logger.warning("  [step3] HTML snippet around 'dlipp': %s", snippet[:300])
+            else:
+                # Try around content area
+                content_start = max(0, html.find("entry-content") - 50)
+                if content_start >= 0:
+                    logger.warning("  [step3] HTML near entry-content: ...%s...", html[content_start:content_start+400])
+            return resources
+
+        # ── Check for paywall ──
+        vk_el = soup.select_one(".wb-vk-wp, .vk-paid-content, [class*='vk-pay']")
+        if vk_el:
+            logger.info("  [step4] VK paywall detected (may block AJAX)")
+
+        # ── Call AJAX endpoint for each rid ──
+        admin_ajax = "https://ppxzy.top/wp-admin/admin-ajax.php"
+        ajax_headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": post_url,
+            "Origin": "https://ppxzy.top",
+        }
+        #拿到 pid 和所有 rid 后，对每个网盘发一次 POST：
+        for rid, label in rid_labels.items():
+            data = {"action": "wb_dlipp_front", "pid": pid, "rid": rid}#获取链接
+            try:
+                r = session.post(admin_ajax, data=data, headers=ajax_headers, timeout=CRAWL_TIMEOUT)
+                logger.info("  [step5] AJAX rid=%s → HTTP %d, body preview: %s",
+                           rid, r.status_code, r.text[:150])
+
+                if r.status_code != 200 or not r.text.strip():
+                    logger.warning("  [step5] AJAX rid=%s empty or bad status, skipping", rid)
+                    continue
+
+                try:
+                    result = r.json()
+                except Exception:
+                    logger.warning("  [step5] AJAX rid=%s response is not JSON: %s", rid, r.text[:200])
+                    continue
+
+                code = result.get("code")
+                logger.info("  [step5] AJAX rid=%s code=%s", rid, code)
+
+                if code == 0:
+                    dl_data = result.get("data", {})
+                    dl_url = dl_data.get("url", "")
+                    dl_pwd = dl_data.get("pwd", "")
+
+                    matched_type = label
+                    for domain, cname in CLOUD_DOMAINS.items():
+                        if dl_url and domain in dl_url.lower():
+                            matched_type = cname
+                            break
+                    #每解析一个网盘就追加
+                    resources.append({
+                        "type": matched_type,
+                        "url": dl_url,
+                        "code": dl_pwd,
+                        "label": label if label != matched_type else matched_type,
+                    })
+                    logger.info("  [step5] SUCCESS rid=%s → %s (pwd=%s)", rid, dl_url[:80], dl_pwd or "(none)")
+
+                elif code == 2:
+                    logger.warning("  [step5] rid=%s → code=2 '请先登录'", rid)
+                elif code == 3:
+                    logger.info("  [step5] rid=%s → code=3 '请评论'", rid)
+                else:
+                    logger.warning("  [step5] rid=%s → unexpected code=%s, response: %s",
+                                   rid, code, r.text[:200])
+
+            except Exception as e:
+                logger.warning("  [step5] AJAX rid=%s exception: %s", rid, e)
+
+    except Exception as e:
+        logger.warning("  [FAIL] outer exception: %s", e)
+
+    logger.info("─── [fetch-resources] done, got %d resource(s) ───", len(resources))
+    return resources
+
+# 入口函数：根据域名分发，返回 list[dict]
+def crawl(url: str, category: str = "", genre: str = "",
+          ppxzy_user: str = "", ppxzy_pass: str = "") -> list[dict]:
     """Crawl a movie listing page and return extracted movie data."""
     domain = urlparse(url).netloc.lower()
-
+    # 爬豆瓣
     if "douban.com" in domain:
         return _crawl_douban(url)
-
+    # 爬皮皮虾
     if "ppxzy.top" in domain:
-        return _crawl_ppxzy(url, category=category, genre=genre)
+        return _crawl_ppxzy(url, category=category, genre=genre,
+                            username=ppxzy_user, password=ppxzy_pass)
 
     return _crawl_generic(url)
 
@@ -78,7 +350,15 @@ def _ppxzy_api(path: str, params: dict | None = None) -> dict:
     return resp
 
 
-def _crawl_ppxzy(url: str, category: str = "", genre: str = "") -> list[dict]:
+def _crawl_ppxzy(url: str, category: str = "", genre: str = "",
+                 username: str = "", password: str = "") -> list[dict]:
+    global _ppxzy_login_failed, _ppxzy_login_attempted, _ppxzy_login_error
+
+    # Reset login state for this crawl
+    _ppxzy_login_failed = False
+    _ppxzy_login_attempted = False
+    _ppxzy_login_error = ""
+
     if category:
         cat_id = PPXZY_CATEGORIES.get(category, 83)
     else:
@@ -88,11 +368,20 @@ def _crawl_ppxzy(url: str, category: str = "", genre: str = "") -> list[dict]:
 
     tag_id = PPXZY_GENRES.get(genre) if genre else None
 
+    want_resources = FETCH_RESOURCE_LINKS and (username or password or PPXZY_USERNAME)
+    session = None
+    if want_resources:
+        logger.info("Attempting ppxzy login for resource links...")
+        session = _ppxzy_login(username, password)
+        if session is None:
+            logger.warning("ppxzy login failed — will crawl movie metadata without resource links")
+            want_resources = False
+
     movies = []
     page = 1
     per_page = 50
     tag_names = {}
-
+    #
     while len(movies) < MAX_MOVIES:
         params = {"categories": cat_id, "per_page": per_page, "page": page, "_embed": 1}
         if tag_id:
@@ -112,10 +401,20 @@ def _crawl_ppxzy(url: str, category: str = "", genre: str = "") -> list[dict]:
         for post in posts:
             movie = _parse_ppxzy_post(post, tag_names)
             if movie and movie["title"]:
+                # Fetch resource links for this movie
+                if want_resources and session and movie.get("url"):
+                    post_url = movie["url"]
+                    logger.info("Fetching resource links from %s", post_url)
+                    resources = _fetch_resource_links(post_url, session)# ← 这一步拿的是这一部电影的网盘链接
+                    movie["resources"] = resources
+                    if resources:
+                        logger.info("  Found %d resource links for %s", len(resources), movie["title"])
+                    time.sleep(CRAWL_DELAY * 0.5)
+
                 movies.append(movie)
                 if len(movies) >= MAX_MOVIES:
                     break
-
+        #总页数
         total_pages = int(resp.headers.get("X-WP-TotalPages", "1"))
         if page >= total_pages or len(movies) >= MAX_MOVIES:
             break
@@ -126,7 +425,7 @@ def _crawl_ppxzy(url: str, category: str = "", genre: str = "") -> list[dict]:
     logger.info("PPXZY crawled %d items from category %d", len(movies), cat_id)
     return movies
 
-
+# 正文提取
 def _parse_ppxzy_post(post: dict, tag_names: dict) -> dict | None:
     title_html = post.get("title", {}).get("rendered", "")
     title_text = re.sub(r"<[^>]+>", "", title_html).strip()
@@ -186,21 +485,22 @@ def _parse_ppxzy_post(post: dict, tag_names: dict) -> dict | None:
         "poster": poster,
         "imdb": imdb,
         "url": post.get("link", ""),
+        "resources": [],
     }
 
-
+#标题解析
 def _parse_ppxzy_title(title: str) -> dict:
     result = {"title": title, "original_title": "", "year": "", "genre": "", "rating": "暂无评分"}
-
+    # brackets = ["流浪地球", "The Wandering Earth", "2019", "8.3", "科幻 / 冒险"]
     brackets = re.findall(r"\[([^\]]+)\]", title)
     if len(brackets) < 2:
         return result
 
-    result["title"] = brackets[0].strip()
+    result["title"] = brackets[0].strip()#第一个元素是中文片名
 
     for segment in brackets[1:]:
         segment = segment.strip()
-        if re.match(r"^\d{4}$", segment):
+        if re.match(r"^\d{4}$", segment):#纯四位数字（年份）
             result["year"] = segment
         elif re.match(r"^\d\.\d{1,2}$", segment):
             result["rating"] = segment
@@ -313,6 +613,7 @@ def _parse_douban_item(item) -> dict | None:
         "poster": poster,
         "url": link,
         "imdb": "",
+        "resources": [],
     }
 
 
@@ -373,6 +674,7 @@ def _crawl_generic(url: str) -> list[dict]:
             "poster": poster,
             "url": link,
             "imdb": "",
+            "resources": [],
         })
 
     logger.info("Generic crawl found %d items from %s", len(movies), url)
