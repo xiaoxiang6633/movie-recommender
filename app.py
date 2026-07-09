@@ -55,6 +55,7 @@ def api_crawl():
     login_error = crawler._ppxzy_login_error
 
     global _movie_cache
+    #上次爬取缓存的电影列表
     _movie_cache = movies
     return jsonify({
         "ok": True,
@@ -74,9 +75,9 @@ def api_crawl():
 def api_recommend():
     data = request.get_json()
     user_query = (data or {}).get("query", "").strip()
-    api_key = (data or {}).get("api_key", "").strip()
+    api_key = (data or {}).get("api_key", "").strip()#作为参数传给recommender.py的
 
-    movies = _movie_cache
+    movies = _movie_cache# 上次爬取缓存的电影列表
     if not movies:
         return jsonify({"ok": False, "error": "请先爬取电影数据"}), 400
     if not user_query:
@@ -86,8 +87,10 @@ def api_recommend():
 
     app.logger.info("Getting recommendations for: %s", user_query)
     try:
+        # 调用 DeepSeek的推荐
         result = recommend(movies, user_query, api_key)
         # Enrich recommendations with resource links from cache
+        # 把缓存的网盘资源链接注入到推荐结果里
         for rec in result.get("recommendations", []):
             rec_title = rec.get("title", "")
             rec_year = rec.get("year", "")
