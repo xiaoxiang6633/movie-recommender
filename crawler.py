@@ -344,7 +344,7 @@ def crawl(url: str, category: str = "", genre: str = "",
 # ─── ppxzy.top (WordPress REST API) ─────────────────────────────
 
 def _ppxzy_api(path: str, params: dict | None = None) -> dict:
-    url = f"https://ppxzy.top/wp-json/wp/v2/{path}"
+    url = f"https://ppxzy.top/wp-json/wp/v2/{path}"# 
     resp = requests.get(url, params=params, headers=HEADERS, timeout=CRAWL_TIMEOUT)
     resp.raise_for_status()
     return resp
@@ -389,7 +389,7 @@ def _crawl_ppxzy(url: str, category: str = "", genre: str = "",
         logger.info("PPXZY API page %d (category=%d, tag=%s)", page, cat_id, tag_id or "none")
 
         try:
-            resp = _ppxzy_api("posts", params)
+            resp = _ppxzy_api("posts", params)# ← 就这一行，真正发出 HTTP 请求
         except Exception as e:
             logger.error("Failed to fetch page %d: %s", page, e)
             break
@@ -397,7 +397,7 @@ def _crawl_ppxzy(url: str, category: str = "", genre: str = "",
         posts = resp.json()
         if not posts:
             break
-
+        #每个电影对应的文章
         for post in posts:
             movie = _parse_ppxzy_post(post, tag_names)
             if movie and movie["title"]:
@@ -459,6 +459,17 @@ def _parse_ppxzy_post(post: dict, tag_names: dict) -> dict | None:
     if not description:
         description = content_text[:300]
     description = re.sub(r"^[·\s]+", "", description)
+
+    # Strip resource links section that trails after the actual plot summary.
+    # ppxzy posts often append download info after the description.
+    stop_at = re.search(r"(?:百度|阿里|夸克|迅雷|115|城通|蓝奏|飞机|移动|360|UC)(?:网盘|云盘)|"
+                        r"(?:资源)?下载(?:链接|地址)?[：:]|"
+                        r"提取码[：:]|"
+                        r"https?://pan\.|"
+                        r"https?://www\.aliyundrive|"
+                        r"https?://pan\.quark", description)
+    if stop_at:
+        description = description[:stop_at.start()].strip()
 
     poster = ""
     soup = BeautifulSoup(content_html, "lxml")
