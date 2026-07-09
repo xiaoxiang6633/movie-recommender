@@ -80,13 +80,21 @@
   .status.loading { color: var(--accent); }
   .status.error { color: var(--error); }
   .status.success { color: var(--success); }
+  .status.warning { color: var(--star); }
 
-  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 14px; }
-  th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 14px; table-layout: fixed; }
+  th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); overflow: hidden; text-overflow: ellipsis; }
   th { color: var(--text-muted); font-weight: 500; font-size: 12px; text-transform: uppercase; }
   tr:hover td { background: rgba(255,255,255,0.02); }
   .rating { color: var(--star); font-weight: 600; }
-  .movie-table-wrap { max-height: 360px; overflow-y: auto; border-radius: 9px; }
+  .movie-table-wrap { max-height: 360px; overflow-y: auto; border-radius: 9px; overflow-x: auto; }
+  .movie-table-wrap th:nth-child(1) { width: 60px; }
+  .movie-table-wrap th:nth-child(2) { width: 14%; }
+  .movie-table-wrap th:nth-child(3) { width: 6%; }
+  .movie-table-wrap th:nth-child(4) { width: 9%; }
+  .movie-table-wrap th:nth-child(5) { width: 8%; }
+  .movie-table-wrap th:nth-child(6) { width: 13%; }
+  .movie-table-wrap th:nth-child(7) { width: auto; }
 
   .rec-card {
     background: var(--bg); border: 1px solid var(--border);
@@ -111,6 +119,8 @@
 
   .hint { color: var(--text-muted); font-size: 12px; margin-top: 6px; }
   .divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
+  .res-link { display:inline-block;margin:2px 3px;padding:3px 8px;background:rgba(99,102,241,0.12);border-radius:6px;font-size:11px;color:var(--accent);text-decoration:none;white-space:nowrap; }
+  .res-link:hover { background:rgba(99,102,241,0.25); }
 </style>
 </head>
 <body>
@@ -171,7 +181,11 @@
   <div class="row grow" style="margin-top:10px;">
     <input type="text" id="tmdbKey" placeholder="TMDB API Key（可选，用于获取高清海报，在 tmdb.org 免费注册获取）" style="flex:1;">
   </div>
-  <div class="hint">选择来源和分类，点击"开始爬取"获取电影数据。填入 TMDB Key 可获取高清海报</div>
+  <div class="row grow" style="margin-top:10px;">
+    <input type="text" id="ppxzyUser" placeholder="ppxzy账号（可选，填入后可获取网盘资源链接）" style="flex:1;">
+    <input type="password" id="ppxzyPass" placeholder="ppxzy密码" style="flex:1;">
+  </div>
+  <div class="hint">选择来源和分类，点击开始爬取获取电影数据。填入 TMDB Key 可获取高清海报；填入 ppxzy 账号可获取百度网盘/阿里云盘等资源链接</div>
   <div class="status" id="crawlStatus"></div>
   <div class="movie-table-wrap" id="movieTable" style="display:none;"></div>
 </div>
@@ -221,6 +235,8 @@ async function doCrawl() {
   const category = site === "ppxzy" ? $("category").value : "";
   const genre = site === "ppxzy" ? $("genre").value : "";
   const tmdbKey = $("tmdbKey").value.trim();
+  const ppxzyUser = $("ppxzyUser").value.trim();
+  const ppxzyPass = $("ppxzyPass").value.trim();
 
   const btn = $("crawlBtn");
   btn.disabled = true;
@@ -232,12 +248,25 @@ async function doCrawl() {
     const resp = await fetch("/api/crawl", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, category, genre, tmdb_key: tmdbKey }),
+      body: JSON.stringify({ url, category, genre, tmdb_key: tmdbKey, ppxzy_user: ppxzyUser, ppxzy_pass: ppxzyPass }),
     });
     const data = await resp.json();
     if (!data.ok) throw new Error(data.error);
 
-    showStatus("crawlStatus", `成功爬取 ${data.count} 部电影`, "success");
+    let statusMsg = `成功爬取 ${data.count} 部电影`;
+    let statusCls = "success";
+
+    // Check ppxzy login status
+    if (data.ppxzy_login && data.ppxzy_login.attempted) {
+      if (data.ppxzy_login.ok === false) {
+        statusMsg += ` | ⚠ ppxzy 登录失败：${data.ppxzy_login.error || "账号或密码错误"}，无法获取网盘资源链接`;
+        statusCls = "warning";
+      } else if (data.ppxzy_login.ok === true) {
+        statusMsg += " | ppxzy 登录成功";
+      }
+    }
+
+    showStatus("crawlStatus", statusMsg, statusCls);
     renderMovieTable(data.movies);
   } catch (e) {
     showStatus("crawlStatus", e.message, "error");
@@ -248,18 +277,19 @@ async function doCrawl() {
 }
 
 function renderMovieTable(movies) {
-  let html = '<table><thead><tr><th>剧照</th><th>电影名</th><th>年份</th><th>类型</th><th>导演</th><th>简介</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>剧照</th><th>电影名</th><th>年份</th><th>类型</th><th>导演</th><th>资源</th><th>简介</th></tr></thead><tbody>';
   movies.forEach((m, i) => {
     const imgTag = m.poster
       ? `<img src="${esc(m.poster)}" loading="lazy" style="width:60px;height:80px;object-fit:cover;border-radius:4px;" onerror="this.style.display='none'" alt="">`
       : '<div style="width:60px;height:80px;background:var(--border);border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--text-muted);">无图</div>';
     html += `<tr>
       <td>${imgTag}</td>
-      <td style="white-space:nowrap;"><strong>${esc(m.title)}</strong>${m.original_title ? ' <small style="color:#94a3b8">' + esc(m.original_title) + '</small>' : ""}</td>
-      <td style="white-space:nowrap;">${esc(m.year)}</td>
-      <td style="white-space:nowrap;">${esc(m.genre)}</td>
-      <td style="white-space:nowrap;">${esc(m.director)}</td>
-      <td style="word-break:break-all;">${esc(m.description)}</td>
+      <td><strong title="${esc(m.title)}">${esc(m.title)}</strong>${m.original_title ? ' <small style="color:#94a3b8">' + esc(m.original_title) + '</small>' : ""}</td>
+      <td>${esc(m.year)}</td>
+      <td title="${esc(m.genre)}">${esc(m.genre)}</td>
+      <td title="${esc(m.director)}">${esc(m.director)}</td>
+      <td>${renderResources(m.resources)}</td>
+      <td style="word-wrap:break-word;">${esc(m.description)}</td>
     </tr>`;
   });
   html += "</tbody></table>";
@@ -305,10 +335,14 @@ function renderResults(data) {
   if (recs.length > 0) {
     html += '<hr class="divider">';
     recs.forEach(r => {
+      const hasResources = r.resources && r.resources.length > 0;
+      const resHtml = hasResources
+        ? '<div style="margin-top:8px;font-size:11px;color:var(--text-muted);">资源链接：' + renderResources(r.resources) + '</div>' : '';
       html += `<div class="rec-card">
         <div class="rec-title">${esc(r.title)} <span style="color:#fbbf24;">★ ${esc(r.rating)}</span></div>
         <div class="rec-meta">${esc(r.year || "")}${r.year && r.director ? " · " : ""}${esc(r.director || "")}</div>
         <div class="rec-reason">${esc(r.reason)}</div>
+        ${resHtml}
       </div>`;
     });
   }
@@ -322,6 +356,14 @@ function showStatus(id, msg, cls) {
   const el = $(id);
   el.className = "status " + cls;
   el.innerHTML = msg;
+}
+
+function renderResources(resources) {
+  if (!resources || resources.length === 0) return '<span style="color:var(--text-muted);font-size:11px;">-</span>';
+  return resources.map(r => {
+    const codeStr = r.code ? ' <span style="color:#fbbf24;font-size:10px;">码:' + esc(r.code) + '</span>' : '';
+    return '<a href="' + esc(r.url) + '" target="_blank" rel="noopener" title="' + esc(r.label) + '" class="res-link" >' + esc(r.type) + codeStr + '</a>';
+  }).join('');
 }
 
 function esc(s) {
