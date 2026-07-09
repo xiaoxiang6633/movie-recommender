@@ -7,9 +7,13 @@ DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "")
 TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w342"
 
+PPXZY_USERNAME = os.environ.get("PPXZY_USERNAME", "")
+PPXZY_PASSWORD = os.environ.get("PPXZY_PASSWORD", "")
+
 CRAWL_DELAY = 1.5
 CRAWL_TIMEOUT = 15
-MAX_MOVIES = 200
+MAX_MOVIES = 20
+FETCH_RESOURCE_LINKS = True
 
 HEADERS = {
     "User-Agent": (
