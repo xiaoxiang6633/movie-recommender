@@ -28,6 +28,8 @@ def api_crawl():
     category = (data or {}).get("category", "")
     genre = (data or {}).get("genre", "")
     tmdb_key = (data or {}).get("tmdb_key", "")
+    ppxzy_user = (data or {}).get("ppxzy_user", "")
+    ppxzy_pass = (data or {}).get("ppxzy_pass", "")
     if not url:
         return jsonify({"ok": False, "error": "请输入网址"}), 400
 
@@ -36,15 +38,36 @@ def api_crawl():
         import tmdb
         tmdb.TMDB_API_KEY = tmdb_key
     try:
-        movies = crawl(url, category=category, genre=genre)
+        movies = crawl(url, category=category, genre=genre,
+                       ppxzy_user=ppxzy_user, ppxzy_pass=ppxzy_pass)
         movies = enrich_movies(movies)
     except Exception as e:
         app.logger.error("Crawl error: %s", e)
         return jsonify({"ok": False, "error": f"爬取失败：{e}"}), 500
 
+    # Count movies that have resource links
+    movies_with_resources = sum(1 for m in movies if m.get("resources") and len(m["resources"]) > 0)
+    total_resources = sum(len(m.get("resources", [])) for m in movies)
+
+    # Read ppxzy login state (set by crawler module)
+    import crawler
+    login_ok = not crawler._ppxzy_login_failed if crawler._ppxzy_login_attempted else None
+    login_error = crawler._ppxzy_login_error
+
     global _movie_cache
     _movie_cache = movies
-    return jsonify({"ok": True, "count": len(movies), "movies": movies})
+    return jsonify({
+        "ok": True,
+        "count": len(movies),
+        "movies": movies,
+        "resources_found": total_resources,
+        "movies_with_resources": movies_with_resources,
+        "ppxzy_login": {
+            "attempted": crawler._ppxzy_login_attempted,
+            "ok": login_ok,
+            "error": login_error,
+        },
+    })
 
 
 @app.route("/api/recommend", methods=["POST"])
@@ -64,6 +87,14 @@ def api_recommend():
     app.logger.info("Getting recommendations for: %s", user_query)
     try:
         result = recommend(movies, user_query, api_key)
+        # Enrich recommendations with resource links from cache
+        for rec in result.get("recommendations", []):
+            rec_title = rec.get("title", "")
+            rec_year = rec.get("year", "")
+            for m in movies:
+                if m.get("title") == rec_title and str(m.get("year", "")) == str(rec_year):
+                    rec["resources"] = m.get("resources", [])
+                    break
     except Exception as e:
         app.logger.error("Recommend error: %s", e)
         return jsonify({"ok": False, "error": f"推荐失败：{e}"}), 500
